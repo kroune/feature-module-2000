@@ -1,0 +1,13 @@
+package com.awesomeapp.f330api
+
+sealed class State413_5 {
+    data object Loading : State413_5()
+    data class Success(val data: String) : State413_5()
+    data class Error(val message: String) : State413_5()
+
+    companion object {
+        fun loading() = Loading
+        fun success(data: String) = Success(data)
+        fun error(message: String) = Error(message)
+    }
+}

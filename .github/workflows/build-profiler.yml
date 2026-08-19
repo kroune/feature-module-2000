@@ -1,0 +1,59 @@
+name: build-profiler
+
+# One-off utility: builds gradle-profiler 0.25.2 with longer IDE-connect timeouts
+# (src/.../ide/process/IdeProcess.java hardcodes 60s/1min, which is too short for this
+# 6000-module project on a 4-core runner — the IDE needs several minutes to open the
+# project before the profiler plugin connects). Publishes the dist zip as a release
+# asset that sync-benchmark.yml downloads via the gradle_profiler_url input.
+on:
+  workflow_dispatch:
+    inputs:
+      profiler_ref:
+        description: "gradle-profiler git ref to build"
+        default: "v0.25.2"
+        type: string
+      release_tag:
+        description: "Release tag to (re)publish the asset under"
+        default: "patched-profiler"
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Clone gradle-profiler and patch IDE timeouts
+        run: |
+          git clone -q --depth 1 --branch '${{ inputs.profiler_ref }}' https://github.com/gradle/gradle-profiler gp
+          cd gp
+          sed -i \
+            -e 's|IDE_START_TIMEOUT = Duration.ofSeconds(60)|IDE_START_TIMEOUT = Duration.ofMinutes(10)|' \
+            -e 's|PLUGIN_CONNECT_TIMEOUT = Duration.ofMinutes(1)|PLUGIN_CONNECT_TIMEOUT = Duration.ofMinutes(30)|' \
+            -e 's|AGENT_CONNECT_TIMEOUT = Duration.ofMinutes(1)|AGENT_CONNECT_TIMEOUT = Duration.ofMinutes(30)|' \
+            src/main/java/org/gradle/profiler/ide/process/IdeProcess.java
+          grep -n "TIMEOUT =" src/main/java/org/gradle/profiler/ide/process/IdeProcess.java
+
+      - name: Build distZip
+        run: cd gp && ./gradlew distZip
+
+      - name: Publish release asset
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          cd gp
+          zip=$(ls build/distributions/gradle-profiler-*.zip | head -1)
+          echo "Publishing $zip"
+          gh release delete '${{ inputs.release_tag }}' --yes -R '${{ github.repository }}' 2>/dev/null || true
+          gh release create '${{ inputs.release_tag }}' -R '${{ github.repository }}' \
+            --title "Patched gradle-profiler (long IDE-connect timeouts)" \
+            --notes "Built from gradle/gradle-profiler ${{ inputs.profiler_ref }} with IDE_START/PLUGIN_CONNECT/AGENT_CONNECT timeouts raised to 10/30/30 minutes. Used by sync-benchmark.yml." \
+            --prerelease \
+            "$zip"

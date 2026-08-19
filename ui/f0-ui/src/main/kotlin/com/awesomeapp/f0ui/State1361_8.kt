@@ -1,0 +1,13 @@
+package com.awesomeapp.f0ui
+
+sealed class State1361_8 {
+    data object Loading : State1361_8()
+    data class Success(val data: String) : State1361_8()
+    data class Error(val message: String) : State1361_8()
+
+    companion object {
+        fun loading() = Loading
+        fun success(data: String) = Success(data)
+        fun error(message: String) = Error(message)
+    }
+}

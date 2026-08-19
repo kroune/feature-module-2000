@@ -1,0 +1,32 @@
+// Performance benchmark of an Android Studio sync of the 2000-module project.
+// Two modes, run as two separate gradle-profiler invocations (see README):
+//   cold-sync: zero warm-ups, fresh daemon (--single-shot implies --cold-daemon)
+//   warm-sync: one warm-up, then measured repeated syncs in the same IDE session
+
+cold-sync {
+  title = "Android Studio sync (cold)"
+
+  studio-sync {
+    ide-jvm-args = [
+      "-Xms256m",
+      "-Xmx4g"
+    ]
+  }
+
+  warm-ups = 0
+  iterations = 1
+}
+
+warm-sync {
+  title = "Android Studio sync (warm)"
+
+  studio-sync {
+    ide-jvm-args = [
+      "-Xms256m",
+      "-Xmx4g"
+    ]
+  }
+
+  warm-ups = 1
+  iterations = 3
+}

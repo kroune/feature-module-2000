@@ -1,0 +1,61 @@
+
+*.apk
+*.ap_
+
+*.dex
+
+*.class
+
+bin/
+gen/
+out/
+build/
+generated/
+
+local.properties
+
+.classpath
+.project
+
+# Windows thumbnail db
+.DS_Store
+
+*.iml
+.idea/*
+!.idea/copyright
+# Keep the code styles.
+!/.idea/codeStyles
+/.idea/codeStyles/*
+!/.idea/codeStyles/Project.xml
+!/.idea/codeStyles/codeStyleConfig.xml
+
+.gradle
+
+# Android Studio captures folder
+captures/
+.kotlin
+
+# --- Local analysis junk (not part of the repro) ---
+*.hprof
+*.hprof.gz
+*.index
+*.threads
+java_pid*
+gc-logs/
+heap-report/
+leak_report/
+workspace/
+.playwright-mcp/
+graph.dot
+
+# --- Benchmark outputs ---
+profile-out*/
+gradle-user-home/
+heap-dumps/
+cpu-logs/
+results/
+studio-sandbox/
+sync.scenarios.ciprobe-run.log
+results-probe/
+
+__pycache__/

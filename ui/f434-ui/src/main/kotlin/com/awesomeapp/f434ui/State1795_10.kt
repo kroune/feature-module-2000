@@ -1,0 +1,13 @@
+package com.awesomeapp.f434ui
+
+sealed class State1795_10 {
+    data object Loading : State1795_10()
+    data class Success(val data: String) : State1795_10()
+    data class Error(val message: String) : State1795_10()
+
+    companion object {
+        fun loading() = Loading
+        fun success(data: String) = Success(data)
+        fun error(message: String) = Error(message)
+    }
+}

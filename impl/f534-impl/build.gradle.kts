@@ -1,0 +1,60 @@
+plugins {
+    id("awesome.androidlib.plugin")
+}
+
+dependencies {
+    implementation(project(":api:f534-api"))
+    implementation(project(":api:f633-api"))
+    implementation(project(":api:f153-api"))
+    implementation(project(":api:f466-api"))
+    implementation(project(":api:f479-api"))
+    implementation(project(":api:f407-api"))
+    implementation(project(":foundation:foundation-8"))
+    implementation(project(":foundation:foundation-15"))
+    implementation(project(":foundation:foundation-28"))
+    implementation(project(":core:core-8"))
+    implementation(project(":common:common-21"))
+    implementation(project(":common:common-15"))
+    implementation(libs.androidx.core.ktx)
+    implementation(libs.appcompat)
+    implementation(libs.material)
+    implementation(libs.lifecycle.viewmodel.ktx)
+    implementation(libs.lifecycle.runtime.ktx)
+    implementation(libs.lifecycle.livedata.ktx)
+    implementation(libs.lifecycle.common.java8)
+    implementation(libs.coroutines.android)
+    implementation(libs.fragment.ktx)
+    implementation(libs.activity.ktx)
+    implementation(libs.constraintlayout)
+    implementation(libs.work.runtime.ktx)
+
+
+
+
+    implementation(project.dependencies.platform(libs.compose.bom))
+    implementation(libs.compose.ui)
+    implementation(libs.compose.ui.graphics)
+    implementation(libs.compose.ui.tooling.preview)
+    implementation(libs.compose.material3)
+    implementation(libs.compose.runtime)
+    implementation(libs.compose.runtime.livedata)
+    implementation(libs.activity.compose)
+    implementation(libs.lifecycle.viewmodel.compose)
+    debugImplementation(libs.compose.ui.tooling)
+    debugImplementation(libs.compose.ui.test.manifest)
+
+    testImplementation(libs.junit4)
+    testImplementation(libs.junit5.vintage)
+    testImplementation(libs.coroutines.test)
+    testImplementation(libs.core.testing)
+    testImplementation(libs.mockk)
+    testImplementation(libs.truth)
+    testImplementation(libs.kotlin.test)
+    testImplementation(libs.androidx.test.core)
+    testImplementation(libs.work.testing)
+    testImplementation(libs.robolectric)
+    testImplementation(libs.androidx.test.junit)
+    androidTestImplementation(libs.espresso.core)
+
+
+}

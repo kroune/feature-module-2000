@@ -1,0 +1,13 @@
+package com.awesomeapp.f100impl
+
+sealed class State822_9 {
+    data object Loading : State822_9()
+    data class Success(val data: String) : State822_9()
+    data class Error(val message: String) : State822_9()
+
+    companion object {
+        fun loading() = Loading
+        fun success(data: String) = Success(data)
+        fun error(message: String) = Error(message)
+    }
+}

@@ -1,0 +1,13 @@
+package com.awesomeapp.f148ui
+
+sealed class State1509_6 {
+    data object Loading : State1509_6()
+    data class Success(val data: String) : State1509_6()
+    data class Error(val message: String) : State1509_6()
+
+    companion object {
+        fun loading() = Loading
+        fun success(data: String) = Success(data)
+        fun error(message: String) = Error(message)
+    }
+}
