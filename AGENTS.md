@@ -77,12 +77,19 @@ modules themselves.
   daemon writes the build-ops log; the profiler converts the **last iteration's** log
   to `<scenario>.perfetto.proto` in the output dir. The trace covers only the Gradle
   daemon side — IDE-process work shows up in the CPU time series and the
-  `IDE execution time` sample instead.
+  `IDE execution time` sample instead. The traces are large at this scale (~4 GB raw
+  build-ops log → ~800 MB Perfetto proto per mode); the workflows publish both gzipped.
+  The trace adds daemon-side overhead — keep `build_ops_trace` identical across legs
+  you compare.
 - The runner is 16 GB with 4 cores: CPU percentages from `cpu-sampler.sh` are
   pidstat-style (100% = one core; system busy% caps at 100 across all cores).
 - GitHub release assets are capped at 2 GiB (not a concern here — outputs are MBs);
   Actions artifact downloads are very slow (~0.2 MB/s); releases are the primary
-  distribution channel.
+  distribution channel. Release assets upload by **basename** — both modes produce
+  `benchmark.csv`, so per-mode files are renamed `cold-*`/`warm-*` before upload
+  (duplicate basenames fail the whole `gh release create` with a cryptic HTTP 404).
+  And never collect assets in a `find ... | while read` loop — the pipe makes it a
+  subshell and array additions are lost; use `done < <(find ...)`.
 - Android SDK: API 37 is published as `platforms;android-37.0` (not `android-37`).
 - Android Studio "Quail" downloads are named by codename
   (`android-studio-quail2-linux.tar.gz`), not by version.

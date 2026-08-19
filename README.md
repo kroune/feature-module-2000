@@ -61,8 +61,8 @@ What a run does, end to end:
 3. Publishes results two ways:
    - **A `run-N` release per run** (permanent, fast public download URLs — the primary
      channel): `perf-metrics.json` (machine-readable headline numbers), benchmark
-     CSV/HTML, `cpu-logs.tar.gz` (full CPU time series), `*.perfetto.proto` +
-     gzipped raw build-ops logs, profiler logs, the Studio `idea.log`, and the exact
+     CSV/HTML, `cpu-logs.tar.gz` (full CPU time series), `*.perfetto.proto.gz` +
+     gzipped raw build-ops logs (ui.perfetto.dev opens gzipped traces directly), profiler logs, the Studio `idea.log`, and the exact
      `gradle.properties` / wrapper properties / scenario file used.
    - **A `sync-perf-N` Actions artifact** (kept 7 days) with the full results dirs.
 

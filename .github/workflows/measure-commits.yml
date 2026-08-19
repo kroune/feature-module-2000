@@ -376,20 +376,28 @@ jobs:
           gver=$(basename '${{ steps.dist.outputs.url }}' | sed -E 's/^gradle-//; s/-(bin|all)\.zip$//')
           assets=()
           for f in perf-metrics.json summary.md profiler-cold.log profiler-warm.log \
-                    sync.scenarios gradle.properties gradle/wrapper/gradle-wrapper.properties \
-                    results-cold/benchmark.csv results-cold/benchmark.html \
-                    results-warm/benchmark.csv results-warm/benchmark.html \
-                    results-cold/studio-sandbox/logs/idea.log results-warm/studio-sandbox/logs/idea.log; do
+                    sync.scenarios gradle.properties gradle/wrapper/gradle-wrapper.properties; do
             [ -f "$f" ] && assets+=("$f")
           done
-          # Perfetto traces + raw build-ops logs (gzip the raw logs, they can be large)
-          find results-cold results-warm -name '*-log.txt' 2>/dev/null | while read -r f; do gzip -1 "$f"; done
-          find results-cold results-warm \( -name '*.perfetto.proto' -o -name '*-log.txt.gz' \) 2>/dev/null | while read -r f; do
-            base=$(basename "$f")
-            dir=$(basename "$(dirname "$f")")
-            cp "$f" "$dir-$base"
-            assets+=("$dir-$base")
+          # Per-mode assets need unique names (both modes produce benchmark.csv etc.).
+          for mode in cold warm; do
+            for name in benchmark.csv benchmark.html; do
+              src="results-$mode/$name"
+              [ -f "$src" ] && cp "$src" "$mode-$name" && assets+=("$mode-$name")
+            done
+            ide="results-$mode/studio-sandbox/logs/idea.log"
+            [ -f "$ide" ] && cp "$ide" "$mode-idea.log" && assets+=("$mode-idea.log")
           done
+          # Perfetto traces + raw build-ops logs; gzip both (traces are ~800 MB, raw
+          # logs several GB — ui.perfetto.dev opens gzipped traces directly).
+          find results-cold results-warm -name '*-log.txt' -exec gzip -1 {} + 2>/dev/null || true
+          find results-cold results-warm -name '*.perfetto.proto' -exec gzip -1 {} + 2>/dev/null || true
+          # Process substitution, not a pipe: a piped while-loop runs in a subshell
+          # and the assets array additions would be lost.
+          while read -r f; do
+            base=$(basename "$f")
+            cp "$f" "$base" && assets+=("$base")
+          done < <(find results-cold results-warm \( -name '*.perfetto.proto.gz' -o -name '*-log.txt.gz' \) 2>/dev/null)
           tar -czf cpu-logs.tar.gz -C cpu-logs . 2>/dev/null && assets+=(cpu-logs.tar.gz)
           if [ "${{ steps.bench.outputs.rc_cold }}" = "0" ] && [ "${{ steps.bench.outputs.rc_warm }}" = "0" ]; then
             outcome="cold + warm sync measured"
