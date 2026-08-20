@@ -162,7 +162,9 @@ gradle-profiler --benchmark \
   --studio-install-dir /path/to/android-studio \
   --output-dir results-warm
 
-python3 tools/extract-metrics.py results-cold results-warm cpu-logs perf-metrics.json
+python3 tools/extract-metrics.py perf-metrics.json \
+  --cold results-cold --warm results-warm \
+  --cpu-cold cpu-logs/cold --cpu-warm cpu-logs/warm
 ```
 
 On a headless machine add `GRADLE_PROFILER_OPTS=-Dide.tests.headless=true` (full-GUI

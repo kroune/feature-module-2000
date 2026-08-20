@@ -167,7 +167,9 @@ jobs:
         if: always()
         run: |
           set +e
-          python3 tools/extract-metrics.py results-cold results-warm cpu-logs perf-metrics.json
+          python3 tools/extract-metrics.py perf-metrics.json \
+            --cold results-cold --warm results-warm \
+            --cpu-cold cpu-logs/cold --cpu-warm cpu-logs/warm
           if [ -f calib.json ] && [ -f perf-metrics.json ]; then
             jq --slurpfile c calib.json '.calibration = $c[0]' perf-metrics.json > perf-metrics.tmp && mv perf-metrics.tmp perf-metrics.json
           fi

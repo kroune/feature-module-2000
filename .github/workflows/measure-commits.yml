@@ -11,14 +11,15 @@ name: measure-commits
 #            binDistributionZip) and publishes it as release asset gradle-<sha12>-bin.zip
 #            under tag gradle-build-<sha12>. Skipped entirely when that release already
 #            exists, so re-measuring the same commit is cheap.
-# - sync:    ONE job runs both legs sequentially on the same runner — machine-speed
-#            variance between hosted runners (observed ~20%) cancels out, so the two
-#            legs are directly comparable. Each leg gets a FRESH Gradle user home and
-#            no leftover daemons, so both cold syncs are truly cold; each leg measures
-#            cold (single-shot) then warm (1 warm-up + 3 iterations) sync, with 1 s CPU
-#            sampling and a build-ops/Perfetto trace. Publishes
-#            run-<run_number>-<base|candidate> releases and a run-<run_number>-perf-diff
-#            comparison release.
+# - sync:    ONE job runs both legs on the same runner — machine-speed variance between
+#            hosted runners (observed ~20%) cancels out. Accuracy design (measured in a
+#            same-ref self-test on this repo): a single cold sync per leg still carries
+#            ~25% leg-order/session noise, so each leg gets TWO cold syncs with fresh
+#            Gradle user homes, INTERLEAVED (base1, cand1, base2, cand2), then one warm
+#            scenario per leg (1 warm-up + 3 measured iterations). CPU is sampled at 1 s
+#            across every run; build-ops/Perfetto traces are recorded per run.
+#            Publishes run-<run_number>-<base|candidate> releases and a
+#            run-<run_number>-perf-diff comparison release.
 #
 # Usage:
 #   gh workflow run measure-commits.yml \
@@ -181,12 +182,11 @@ jobs:
             --notes-file summary.md \
             '${{ steps.cached.outputs.asset }}'
 
-  # Both legs run sequentially on THIS runner: identical machine speed, so the
-  # comparison isolates the Gradle change. Each leg gets its own fresh
-  # GRADLE_USER_HOME and no leftover daemons, so both cold syncs are truly cold.
-  # Otherwise the same per-leg benchmark as sync-benchmark.yml (CPU sampling,
-  # build-ops trace, timeout instead of the heap-dump watchdog). The perf diff is
-  # computed in-job — both legs' metrics are local files here.
+  # Both legs run on THIS runner: identical machine speed, so the comparison isolates
+  # the Gradle change. Every cold sync gets its own fresh GRADLE_USER_HOME (and no
+  # leftover daemons), and the legs interleave (base1, cand1, base2, cand2) so any
+  # within-job machine-speed drift hits both legs equally. The perf diff is computed
+  # in-job — both legs' metrics are local files here.
   sync:
     needs: [resolve, build]
     runs-on: ubuntu-latest
@@ -242,7 +242,7 @@ jobs:
 
       # gradle-profiler hangs forever when the daemon dies mid-sync (the TAPI call never
       # returns), so each run is wrapped in `timeout -s KILL`: if the daemon OOMs, the
-      # leg fails instead of burning the whole job timeout. CPU sampling runs across
+      # run fails instead of burning the whole job timeout. CPU sampling runs across
       # each profiler invocation.
       - name: Run benchmarks for base and candidate on this runner
         id: bench
@@ -257,54 +257,75 @@ jobs:
           TRACE_FLAG=()
           [ '${{ inputs.build_ops_trace }}' = 'true' ] && TRACE_FLAG=(--build-ops-trace)
 
-          run_leg() {
-            local leg="$1" sha="$2"
+          pin_leg_config() {
+            local leg="$1" sha url esc
+            if [ "$leg" = base ]; then sha='${{ needs.resolve.outputs.base_sha }}'; else sha='${{ needs.resolve.outputs.candidate_sha }}'; fi
             local sha12=$(echo "$sha" | cut -c1-12)
-            local url="https://github.com/${{ github.repository }}/releases/download/gradle-build-$sha12/gradle-$sha12-bin.zip"
-            echo "=== leg $leg: $sha ($url)"
-            local esc=$(printf '%s' "$url" | sed 's/[&\\]/\\&/g')
+            url="https://github.com/${{ github.repository }}/releases/download/gradle-build-$sha12/gradle-$sha12-bin.zip"
+            echo "--- pinning $leg: $sha ($url)"
+            esc=$(printf '%s' "$url" | sed 's/[&\\]/\\&/g')
             sed -i "s|^distributionUrl=.*|distributionUrl=$esc|" gradle/wrapper/gradle-wrapper.properties
             sed -i -E "/^org.gradle.jvmargs=/ s|-Xmx[0-9]+[gGmM]|-Xmx$XMX|" gradle.properties
             sed -i -E "/^org.gradle.jvmargs=/ s|-Xms[0-9]+[gGmM]|-Xms$XMX|" gradle.properties
             grep -q UseCompactObjectHeaders gradle.properties || \
               sed -i "/^org.gradle.jvmargs=/ s|\$| -XX:+UseCompactObjectHeaders|" gradle.properties
-            cat gradle.properties
+          }
 
-            # Truly cold start for this leg: fresh Gradle user home, no daemons or IDE.
+          reset_to_cold() {
             pkill -KILL -f gradle-profiler 2>/dev/null
             pkill -KILL -f GradleDaemon 2>/dev/null
             pkill -KILL -f studio 2>/dev/null
             sleep 5
-            export GRADLE_USER_HOME="$RUNNER_TEMP/guh-$leg"
-            rm -rf "$GRADLE_USER_HOME"
-
-            for mode in cold warm; do
-              local extra=() limit=60
-              [ "$mode" = cold ] && extra=(--single-shot) && limit=75
-              mkdir -p "cpu-logs/$leg-$mode"
-              tools/cpu-sampler.sh "cpu-logs/$leg-$mode" 1 &
-              local sampler=$!
-              timeout -s KILL "${limit}m" xvfb-run -a gradle-profiler --benchmark \
-                "${extra[@]}" "${TRACE_FLAG[@]}" \
-                --project-dir . \
-                --scenario-file sync.scenarios \
-                --studio-install-dir "$RUNNER_TEMP/studio" \
-                --output-dir "results-$leg-$mode" \
-                "$mode-sync" \
-                > "profiler-$leg-$mode.log" 2>&1
-              local rc=$?
-              kill -TERM $sampler 2>/dev/null
-              sleep 2
-              echo "rc_${leg}_${mode}=$rc" >> "$GITHUB_OUTPUT"
-              echo "leg=$leg mode=$mode rc=$rc"
-            done
           }
 
-          run_leg base '${{ needs.resolve.outputs.base_sha }}'
-          run_leg candidate '${{ needs.resolve.outputs.candidate_sha }}'
-          pkill -KILL -f gradle-profiler 2>/dev/null
-          pkill -KILL -f GradleDaemon 2>/dev/null
-          pkill -KILL -f studio 2>/dev/null
+          run_profiler() {
+            local leg="$1" tag="$2" timeout_min="$3"; shift 3
+            mkdir -p "cpu-logs/$leg-$tag"
+            tools/cpu-sampler.sh "cpu-logs/$leg-$tag" 1 &
+            local sampler=$!
+            timeout -s KILL "${timeout_min}m" xvfb-run -a gradle-profiler --benchmark \
+              "$@" "${TRACE_FLAG[@]}" \
+              --project-dir . \
+              --scenario-file sync.scenarios \
+              --studio-install-dir "$RUNNER_TEMP/studio" \
+              --output-dir "results-$leg-$tag" \
+              > "profiler-$leg-$tag.log" 2>&1
+            local rc=$?
+            kill -TERM $sampler 2>/dev/null
+            sleep 2
+            echo "rc_${leg}_${tag}=$rc" >> "$GITHUB_OUTPUT"
+            echo "leg=$leg run=$tag rc=$rc"
+            return $rc
+          }
+
+          # One truly cold sync: fresh Gradle user home (wrapper dist, dependency cache,
+          # configuration cache — all cold), no leftover daemons.
+          run_cold() {
+            local leg="$1" idx="$2"
+            pin_leg_config "$leg"
+            reset_to_cold
+            export GRADLE_USER_HOME="$RUNNER_TEMP/guh-$leg-cold$idx"
+            rm -rf "$GRADLE_USER_HOME"
+            run_profiler "$leg" "cold$idx" 45 --single-shot cold-sync
+          }
+
+          # Warm sync reuses the leg's second cold-run user home (dependency cache etc.
+          # warm; the scenario's own warm-up iteration handles daemon/IDE warmup).
+          run_warm() {
+            local leg="$1"
+            pin_leg_config "$leg"
+            reset_to_cold
+            export GRADLE_USER_HOME="$RUNNER_TEMP/guh-$leg-cold2"
+            run_profiler "$leg" warm 45 warm-sync
+          }
+
+          run_cold base 1
+          run_cold candidate 1
+          run_cold base 2
+          run_cold candidate 2
+          run_warm base
+          run_warm candidate
+          reset_to_cold
           for f in profiler-*.log; do echo "== $f tail =="; tail -20 "$f"; done
           exit 0
 
@@ -314,10 +335,11 @@ jobs:
         run: |
           set +e
           for leg in base candidate; do
-            mkdir -p "cpuview-$leg"
-            ln -sf ../cpu-logs/$leg-cold "cpuview-$leg/cold"
-            ln -sf ../cpu-logs/$leg-warm "cpuview-$leg/warm"
-            python3 tools/extract-metrics.py results-$leg-cold results-$leg-warm "cpuview-$leg" perf-metrics-$leg.json
+            python3 tools/extract-metrics.py perf-metrics-$leg.json \
+              --cold results-$leg-cold1 results-$leg-cold2 \
+              --warm results-$leg-warm \
+              --cpu-cold cpu-logs/$leg-cold1 cpu-logs/$leg-cold2 \
+              --cpu-warm cpu-logs/$leg-warm
             if [ -f calib.json ] && [ -f perf-metrics-$leg.json ]; then
               jq --slurpfile c calib.json '.calibration = $c[0]' perf-metrics-$leg.json > pm.tmp && mv pm.tmp perf-metrics-$leg.json
             fi
@@ -329,8 +351,10 @@ jobs:
             echo "- candidate: \`${{ inputs.candidate_repo }}@${{ inputs.candidate_ref }}\` (\`${{ needs.resolve.outputs.candidate_sha }}\`)"
             echo "- Daemon heap: \`${{ inputs.daemon_xmx }}\` (JDK 25, \`-XX:+UseCompactObjectHeaders\`)"
             echo "- Build-ops trace: \`${{ inputs.build_ops_trace }}\`"
-            echo "- Both legs ran sequentially on the SAME runner (machine speed cancels out)"
-            echo "- exit codes: base cold/warm=\`${{ steps.bench.outputs.rc_base_cold }}\`/\`${{ steps.bench.outputs.rc_base_warm }}\`, candidate cold/warm=\`${{ steps.bench.outputs.rc_candidate_cold }}\`/\`${{ steps.bench.outputs.rc_candidate_warm }}\` (124/137 = timeout kill, likely daemon OOM)"
+            echo "- Both legs ran on the SAME runner, cold syncs interleaved (base1, cand1, base2, cand2)"
+            echo "- exit codes (124/137 = timeout kill, likely daemon OOM):"
+            echo "  - base: cold1=\`${{ steps.bench.outputs.rc_base_cold1 }}\` cold2=\`${{ steps.bench.outputs.rc_base_cold2 }}\` warm=\`${{ steps.bench.outputs.rc_base_warm }}\`"
+            echo "  - candidate: cold1=\`${{ steps.bench.outputs.rc_candidate_cold1 }}\` cold2=\`${{ steps.bench.outputs.rc_candidate_cold2 }}\` warm=\`${{ steps.bench.outputs.rc_candidate_warm }}\`"
             echo "- workflow run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
             echo
           } > summary.md
@@ -345,7 +369,7 @@ jobs:
             cat compare.md >> summary.md
           fi
           for leg in base candidate; do
-            for mode in cold warm; do
+            for mode in cold1 cold2 warm; do
               [ -f "cpu-logs/$leg-$mode/system.csv" ] || continue
               echo "### $leg $mode sync" >> summary.md
               python3 tools/cpu-summary.py "cpu-logs/$leg-$mode" >> summary.md
@@ -370,9 +394,11 @@ jobs:
             profiler-*.log
             gradle.properties
             gradle/wrapper/gradle-wrapper.properties
-            results-base-cold/
+            results-base-cold1/
+            results-base-cold2/
             results-base-warm/
-            results-candidate-cold/
+            results-candidate-cold1/
+            results-candidate-cold2/
             results-candidate-warm/
 
       - name: Job summary
@@ -390,19 +416,21 @@ jobs:
 
           # Perfetto traces + raw build-ops logs; gzip both (traces are ~800 MB, raw
           # logs several GB — ui.perfetto.dev opens gzipped traces directly).
-          find results-base-cold results-base-warm results-candidate-cold results-candidate-warm \
+          find results-base-cold1 results-base-cold2 results-base-warm \
+               results-candidate-cold1 results-candidate-cold2 results-candidate-warm \
             -name '*-log.txt' -exec gzip -1 {} + 2>/dev/null || true
-          find results-base-cold results-base-warm results-candidate-cold results-candidate-warm \
+          find results-base-cold1 results-base-cold2 results-base-warm \
+               results-candidate-cold1 results-candidate-cold2 results-candidate-warm \
             -name '*.perfetto.proto' -exec gzip -1 {} + 2>/dev/null || true
 
           publish_leg() {
-            local leg="$1" title_leg="$2" rc_c="$3" rc_w="$4"
+            local leg="$1" title_leg="$2" rc_c1="$3" rc_c2="$4" rc_w="$5"
             local tag="run-${{ github.run_number }}-$leg"
             local assets=()
-            for f in perf-metrics-$leg.json profiler-$leg-cold.log profiler-$leg-warm.log; do
+            for f in perf-metrics-$leg.json profiler-$leg-cold1.log profiler-$leg-cold2.log profiler-$leg-warm.log; do
               [ -f "$f" ] && assets+=("$f")
             done
-            for mode in cold warm; do
+            for mode in cold1 cold2 warm; do
               for name in benchmark.csv benchmark.html; do
                 local src="results-$leg-$mode/$name"
                 [ -f "$src" ] && cp "$src" "$leg-$mode-$name" && assets+=("$leg-$mode-$name")
@@ -416,8 +444,8 @@ jobs:
                 cp "$f" "$leg-$mode-$base" && assets+=("$leg-$mode-$base")
               done < <(find "results-$leg-$mode" \( -name '*.perfetto.proto.gz' -o -name '*-log.txt.gz' \) 2>/dev/null)
             done
-            local outcome="cold + warm sync measured"
-            [ "$rc_c" = "0" ] && [ "$rc_w" = "0" ] || outcome="FAILED (cold rc=$rc_c, warm rc=$rc_w)"
+            local outcome="cold x2 + warm sync measured"
+            [ "$rc_c1" = "0" ] && [ "$rc_c2" = "0" ] && [ "$rc_w" = "0" ] || outcome="FAILED (cold1 rc=$rc_c1, cold2 rc=$rc_c2, warm rc=$rc_w)"
             gh release delete "$tag" --yes -R '${{ github.repository }}' 2>/dev/null || true
             gh release create "$tag" -R '${{ github.repository }}' \
               --title "Sync perf run #${{ github.run_number }} ($title_leg) — daemon ${{ inputs.daemon_xmx }} — $outcome" \
@@ -426,9 +454,9 @@ jobs:
           }
 
           publish_leg base '${{ inputs.base_repo }}@${{ inputs.base_ref }}' \
-            '${{ steps.bench.outputs.rc_base_cold }}' '${{ steps.bench.outputs.rc_base_warm }}'
+            '${{ steps.bench.outputs.rc_base_cold1 }}' '${{ steps.bench.outputs.rc_base_cold2 }}' '${{ steps.bench.outputs.rc_base_warm }}'
           publish_leg candidate '${{ inputs.candidate_repo }}@${{ inputs.candidate_ref }}' \
-            '${{ steps.bench.outputs.rc_candidate_cold }}' '${{ steps.bench.outputs.rc_candidate_warm }}'
+            '${{ steps.bench.outputs.rc_candidate_cold1 }}' '${{ steps.bench.outputs.rc_candidate_cold2 }}' '${{ steps.bench.outputs.rc_candidate_warm }}'
 
           tar -czf cpu-logs.tar.gz -C cpu-logs . 2>/dev/null || true
           diff_tag="run-${{ github.run_number }}-perf-diff"
@@ -448,14 +476,17 @@ jobs:
         if: always()
         run: |
           failed=0
-          rc_bc='${{ steps.bench.outputs.rc_base_cold }}'
+          rc_bc1='${{ steps.bench.outputs.rc_base_cold1 }}'
+          rc_bc2='${{ steps.bench.outputs.rc_base_cold2 }}'
           rc_bw='${{ steps.bench.outputs.rc_base_warm }}'
-          rc_cc='${{ steps.bench.outputs.rc_candidate_cold }}'
+          rc_cc1='${{ steps.bench.outputs.rc_candidate_cold1 }}'
+          rc_cc2='${{ steps.bench.outputs.rc_candidate_cold2 }}'
           rc_cw='${{ steps.bench.outputs.rc_candidate_warm }}'
-          for pair in "base cold $rc_bc" "base warm $rc_bw" "candidate cold $rc_cc" "candidate warm $rc_cw"; do
+          for pair in "base cold1 $rc_bc1" "base cold2 $rc_bc2" "base warm $rc_bw" \
+                      "candidate cold1 $rc_cc1" "candidate cold2 $rc_cc2" "candidate warm $rc_cw"; do
             set -- $pair
             if [ "$3" != "0" ]; then echo "FAIL: $1 $2 sync did not complete (rc=$3; 124/137 = timeout, likely daemon OOM at ${{ inputs.daemon_xmx }})"; failed=1; fi
             if [ "$3" = "0" ] && [ ! -f "results-$1-$2/benchmark.csv" ]; then echo "FAIL: $1 $2 finished but benchmark.csv is missing"; failed=1; fi
           done
-          [ "$failed" = 0 ] && echo "OK: both legs measured (cold + warm) on one runner."
+          [ "$failed" = 0 ] && echo "OK: both legs measured (2x cold + warm) on one runner."
           exit $failed

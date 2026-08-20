@@ -79,12 +79,15 @@ modules themselves.
   build-script classpath models (the 3000-module repo never sees this: the daemon OOMs
   first). `gradle_distribution_url` is the `gradle-build-0fde246a8947` custom build
   (re-hosted in this repo's releases, ABI-paired with those branches).
-- Comparisons (`measure-commits`, `measure-idea-commits`) run both legs **sequentially
-  on one runner** on purpose: GitHub-hosted runners vary ~20% in speed (observed: one
-  leg of a parallel matrix on a slow runner fakes a ~20% regression). Each leg kills
-  leftover daemons/IDE and uses a fresh `GRADLE_USER_HOME`, so both cold syncs are
-  truly cold. Job timeout is 360 min; per-mode `timeout` is 75/60 min so a hung
-  (OOM'd) leg fails fast without eating the other leg's budget. `tools/runner-calib.py`
+- Comparisons (`measure-commits`, `measure-idea-commits`) run both legs **on one
+  runner, interleaved** (base cold1 → cand cold1 → base cold2 → cand cold2 → warms):
+  GitHub-hosted runners vary ~20% in speed between machines, AND a single cold sync
+  still carries ~25% leg-order/session noise even on one machine (measured in a
+  same-ref self-test: run-3 cold 533s vs 402s with identical inputs). Warm iterations
+  also alternate slow/fast within a session (267s/68s/228s) — compare iteration-wise,
+  not just means. Each cold run kills leftover daemons/IDE and uses a fresh
+  `GRADLE_USER_HOME`. Job timeout is 360 min; per-run `timeout` is 45 min so a hung
+  (OOM'd) run fails fast without eating the other legs' budget. `tools/runner-calib.py`
   records the machine's speed in every `perf-metrics.json` (`calibration` key) — check
   it when a single `sync-benchmark` run looks off.
 - `--build-ops-trace` works for studio-sync scenarios: the trace flags
