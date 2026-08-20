@@ -4,24 +4,25 @@ name: measure-idea-commits
 # branch with a Gradle-sync optimization) against this 2000-module sync benchmark,
 # in a single run:
 #
-#   resolve -> build-idea (base + candidate in parallel) -> sync (base + candidate in parallel)
-#                                                        -> compare
+#   resolve -> build-idea (base + candidate in parallel) -> sync (BOTH LEGS ON ONE RUNNER)
 #
 # - resolve:    turns IDEA refs (branch / tag / short or full SHA) into full SHAs.
 # - build-idea: builds the Gradle tooling-extension jars (toolingExtension-api +
 #               toolingExtension-impl) from the IntelliJ sources via Bazel and publishes
 #               them as release asset idea-tooling-<sha12>.zip under tag
 #               idea-build-<sha12>. Skipped when that release already exists.
-# - sync:       the same cold+warm headless Android Studio sync benchmark as
-#               measure-commits (see that file: CPU sampling, build-ops trace, timeout
-#               instead of the heap-dump watchdog), with the Studio-bundled
-#               tooling-extension jars REPLACED by the freshly built ones (the tooling
-#               extension runs inside the Gradle daemon during sync; the rest of the IDE
-#               is untouched). The Gradle distribution is FIXED for both legs via
-#               gradle_distribution_url, so only the IDE side differs. Publishes a
-#               run-idea-<run_number>-<base|candidate> release.
-# - compare:    downloads both legs' perf-metrics.json and publishes a side-by-side
-#               diff as run-idea-<run_number>-perf-diff.
+# - sync:       ONE job runs both legs sequentially on the same runner — machine-speed
+#               variance between hosted runners (observed ~20%) cancels out, so the two
+#               legs are directly comparable. The Studio-bundled tooling-extension jars
+#               are REPLACED per leg with the freshly built ones (the tooling extension
+#               runs inside the Gradle daemon during sync; the rest of the IDE is
+#               untouched). The Gradle distribution is FIXED for both legs via
+#               gradle_distribution_url, so only the IDE side differs. Each leg gets a
+#               FRESH Gradle user home and no leftover daemons, so both cold syncs are
+#               truly cold; each leg measures cold (single-shot) then warm (1 warm-up +
+#               3 iterations) sync, with 1 s CPU sampling and a build-ops/Perfetto
+#               trace. Publishes run-idea-<run_number>-<base|candidate> releases and a
+#               run-idea-<run_number>-perf-diff comparison release.
 #
 # Usage:
 #   gh workflow run measure-idea-commits.yml \
@@ -74,6 +75,8 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       matrix: ${{ steps.resolve.outputs.matrix }}
+      base_sha: ${{ steps.resolve.outputs.base_sha }}
+      candidate_sha: ${{ steps.resolve.outputs.candidate_sha }}
     steps:
       - name: Resolve refs to SHAs
         id: resolve
@@ -90,6 +93,8 @@ jobs:
             --arg cr '${{ inputs.candidate_repo }}' --arg cs "$cand_sha" \
             '[{name:"base",repo:$br,sha:$bs},{name:"candidate",repo:$cr,sha:$cs}]')
           echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
+          echo "base_sha=$base_sha" >> "$GITHUB_OUTPUT"
+          echo "candidate_sha=$cand_sha" >> "$GITHUB_OUTPUT"
           {
             echo "## Resolved IntelliJ refs"
             echo
@@ -185,26 +190,17 @@ jobs:
             --notes-file summary.md \
             '${{ steps.cached.outputs.asset }}'
 
-  # Same perf-sync logic as the sync job in measure-commits.yml — kept as a copy on
-  # purpose (single self-contained workflow run). Differences: the Gradle distribution
-  # is a fixed input for both legs, the Studio tooling-extension jars are overlaid from
-  # the build-idea job, and release tags use the run-idea- prefix.
+  # Both legs run sequentially on THIS runner: identical machine speed, so the
+  # comparison isolates the IDE-side change. Each leg gets its own fresh
+  # GRADLE_USER_HOME and no leftover daemons, so both cold syncs are truly cold.
+  # Otherwise the same per-leg benchmark as sync-benchmark.yml (CPU sampling,
+  # build-ops trace, timeout instead of the heap-dump watchdog). The perf diff is
+  # computed in-job — both legs' metrics are local files here.
   sync:
     needs: [resolve, build-idea]
     runs-on: ubuntu-latest
-    timeout-minutes: 300
-    strategy:
-      fail-fast: false
-      matrix:
-        include: ${{ fromJSON(needs.resolve.outputs.matrix) }}
+    timeout-minutes: 360
     steps:
-      - name: Compute URLs
-        id: urls
-        run: |
-          sha12=$(echo '${{ matrix.sha }}' | cut -c1-12)
-          echo "idea_url=https://github.com/${{ github.repository }}/releases/download/idea-build-$sha12/idea-tooling-$sha12.zip" >> "$GITHUB_OUTPUT"
-          echo "gradle_url=${{ inputs.gradle_distribution_url }}" >> "$GITHUB_OUTPUT"
-
       - uses: actions/checkout@v4
 
       - name: Free disk space
@@ -215,8 +211,7 @@ jobs:
           docker system prune -af || true
           echo "== after =="; df -h /
 
-      # Fixed busy-loop score: makes slow-runner outliers detectable (GitHub-hosted
-      # runners vary ~10-20% in speed; see tools/runner-calib.py).
+      # Fixed busy-loop score: documents this runner's speed (see tools/runner-calib.py).
       - name: Runner speed calibration
         run: python3 tools/runner-calib.py calib.json
 
@@ -238,7 +233,7 @@ jobs:
 
       - name: Pin Gradle distribution
         run: |
-          url='${{ steps.urls.outputs.gradle_url }}'
+          url='${{ inputs.gradle_distribution_url }}'
           esc=$(printf '%s' "$url" | sed 's/[&\\]/\\&/g')
           sed -i "s|^distributionUrl=.*|distributionUrl=$esc|" gradle/wrapper/gradle-wrapper.properties
           grep '^distributionUrl' gradle/wrapper/gradle-wrapper.properties
@@ -269,246 +264,238 @@ jobs:
           ls "$RUNNER_TEMP/studio/bin"
           df -h /
 
-      # The tooling extension runs inside the Gradle daemon during sync; replacing these
-      # two jars is enough to swap the IDE-side dependency resolution implementation.
-      - name: Overlay tooling-extension jars into Studio
+      - name: Download both legs' tooling-extension jars
         run: |
           set -euo pipefail
-          curl -sL -o tooling.zip '${{ steps.urls.outputs.idea_url }}'
-          mkdir -p "$RUNNER_TEMP/tooling" && unzip -q tooling.zip -d "$RUNNER_TEMP/tooling" && rm tooling.zip
-          ls -l "$RUNNER_TEMP/tooling"
-          for name in gradle-tooling-extension-api gradle-tooling-extension-impl; do
-            target=$(find "$RUNNER_TEMP/studio/plugins" -name "$name.jar" | head -1)
-            if [ -z "$target" ]; then
-              echo "ERROR: $name.jar not found in the Studio installation" >&2
-              exit 1
-            fi
-            echo "replacing $target"
-            cp "$RUNNER_TEMP/tooling/$name.jar" "$target"
+          for leg in base candidate; do
+            if [ "$leg" = base ]; then sha='${{ needs.resolve.outputs.base_sha }}'; else sha='${{ needs.resolve.outputs.candidate_sha }}'; fi
+            sha12=$(echo "$sha" | cut -c1-12)
+            url="https://github.com/${{ github.repository }}/releases/download/idea-build-$sha12/idea-tooling-$sha12.zip"
+            echo "$leg: $url"
+            curl -sL -o "tooling-$leg.zip" "$url"
+            mkdir -p "$RUNNER_TEMP/tooling-$leg" && unzip -q "tooling-$leg.zip" -d "$RUNNER_TEMP/tooling-$leg" && rm "tooling-$leg.zip"
+            ls -l "$RUNNER_TEMP/tooling-$leg"
           done
 
       # gradle-profiler hangs forever when the daemon dies mid-sync (the TAPI call never
       # returns), so each run is wrapped in `timeout -s KILL`: if the daemon OOMs, the
-      # run fails instead of burning the whole job timeout. CPU sampling runs across
+      # leg fails instead of burning the whole job timeout. CPU sampling runs across
       # each profiler invocation.
-      - name: Run sync benchmarks (cold + warm) via gradle-profiler
+      - name: Run benchmarks for base and candidate on this runner
         id: bench
         env:
-          GRADLE_USER_HOME: ${{ runner.temp }}/guh
           # Force gradle-profiler to launch the IDE with its headless starter
           # (full-GUI Studio hangs on project frame creation on CI).
           GRADLE_PROFILER_OPTS: "-Dide.tests.headless=true"
         run: |
           set +e
           if ! command -v xvfb-run >/dev/null; then sudo apt-get update && sudo apt-get install -y xvfb; fi
-
           TRACE_FLAG=()
-          if [ '${{ inputs.build_ops_trace }}' = 'true' ]; then TRACE_FLAG=(--build-ops-trace); fi
+          [ '${{ inputs.build_ops_trace }}' = 'true' ] && TRACE_FLAG=(--build-ops-trace)
 
-          run_mode() {
-            local mode="$1" timeout_min="$2"; shift 2
-            mkdir -p "cpu-logs/$mode"
-            tools/cpu-sampler.sh "cpu-logs/$mode" 1 &
-            local sampler=$!
-            timeout -s KILL "${timeout_min}m" xvfb-run -a gradle-profiler --benchmark \
-              "$@" "${TRACE_FLAG[@]}" \
-              --project-dir . \
-              --scenario-file sync.scenarios \
-              --studio-install-dir "$RUNNER_TEMP/studio" \
-              --output-dir "results-$mode" \
-              > "profiler-$mode.log" 2>&1
-            local rc=$?
-            kill -TERM $sampler 2>/dev/null || true
-            sleep 2
-            return $rc
+          run_leg() {
+            local leg="$1"
+            echo "=== leg $leg"
+
+            # The tooling extension runs inside the Gradle daemon during sync; replacing
+            # these two jars is enough to swap the IDE-side implementation for this leg.
+            for name in gradle-tooling-extension-api gradle-tooling-extension-impl; do
+              target=$(find "$RUNNER_TEMP/studio/plugins" -name "$name.jar" | head -1)
+              if [ -z "$target" ]; then
+                echo "ERROR: $name.jar not found in the Studio installation" >&2
+                return 1
+              fi
+              echo "replacing $target with the $leg build"
+              cp "$RUNNER_TEMP/tooling-$leg/$name.jar" "$target"
+            done
+
+            # Truly cold start for this leg: fresh Gradle user home, no daemons or IDE.
+            pkill -KILL -f gradle-profiler 2>/dev/null
+            pkill -KILL -f GradleDaemon 2>/dev/null
+            pkill -KILL -f studio 2>/dev/null
+            sleep 5
+            export GRADLE_USER_HOME="$RUNNER_TEMP/guh-$leg"
+            rm -rf "$GRADLE_USER_HOME"
+
+            for mode in cold warm; do
+              local extra=() limit=60
+              [ "$mode" = cold ] && extra=(--single-shot) && limit=75
+              mkdir -p "cpu-logs/$leg-$mode"
+              tools/cpu-sampler.sh "cpu-logs/$leg-$mode" 1 &
+              local sampler=$!
+              timeout -s KILL "${limit}m" xvfb-run -a gradle-profiler --benchmark \
+                "${extra[@]}" "${TRACE_FLAG[@]}" \
+                --project-dir . \
+                --scenario-file sync.scenarios \
+                --studio-install-dir "$RUNNER_TEMP/studio" \
+                --output-dir "results-$leg-$mode" \
+                "$mode-sync" \
+                > "profiler-$leg-$mode.log" 2>&1
+              local rc=$?
+              kill -TERM $sampler 2>/dev/null
+              sleep 2
+              echo "rc_${leg}_${mode}=$rc" >> "$GITHUB_OUTPUT"
+              echo "leg=$leg mode=$mode rc=$rc"
+            done
           }
 
-          run_mode cold 150 --single-shot cold-sync
-          rc_cold=$?
-          echo "cold sync exit code: $rc_cold"
-
-          run_mode warm 90 warm-sync
-          rc_warm=$?
-          echo "warm sync exit code: $rc_warm"
-
-          pkill -KILL -f gradle-profiler 2>/dev/null || true
-          pkill -KILL -f GradleDaemon 2>/dev/null || true
-          pkill -KILL -f studio 2>/dev/null || true
-          echo "rc_cold=$rc_cold" >> "$GITHUB_OUTPUT"
-          echo "rc_warm=$rc_warm" >> "$GITHUB_OUTPUT"
-          echo "== profiler-cold.log tail =="; tail -40 profiler-cold.log || true
-          echo "== profiler-warm.log tail =="; tail -40 profiler-warm.log || true
+          run_leg base
+          run_leg candidate
+          pkill -KILL -f gradle-profiler 2>/dev/null
+          pkill -KILL -f GradleDaemon 2>/dev/null
+          pkill -KILL -f studio 2>/dev/null
+          for f in profiler-*.log; do echo "== $f tail =="; tail -20 "$f"; done
           exit 0
 
-      - name: Build perf report
+      - name: Build perf reports and comparison
         id: report
         if: always()
         run: |
           set +e
-          python3 tools/extract-metrics.py results-cold results-warm cpu-logs perf-metrics.json
-          if [ -f calib.json ] && [ -f perf-metrics.json ]; then
-            jq --slurpfile c calib.json '.calibration = $c[0]' perf-metrics.json > perf-metrics.tmp && mv perf-metrics.tmp perf-metrics.json
-          fi
+          for leg in base candidate; do
+            mkdir -p "cpuview-$leg"
+            ln -sf ../cpu-logs/$leg-cold "cpuview-$leg/cold"
+            ln -sf ../cpu-logs/$leg-warm "cpuview-$leg/warm"
+            python3 tools/extract-metrics.py results-$leg-cold results-$leg-warm "cpuview-$leg" perf-metrics-$leg.json
+            if [ -f calib.json ] && [ -f perf-metrics-$leg.json ]; then
+              jq --slurpfile c calib.json '.calibration = $c[0]' perf-metrics-$leg.json > pm.tmp && mv pm.tmp perf-metrics-$leg.json
+            fi
+          done
           {
-            echo "## Android Studio sync performance (${{ matrix.name }}: \`${{ matrix.repo }}@${{ matrix.sha }}\`)"
+            echo "## Android Studio sync performance comparison (IDE-side)"
             echo
-            echo "- Gradle distribution (fixed): \`${{ steps.urls.outputs.gradle_url }}\`"
-            echo "- Tooling extension jars: \`${{ steps.urls.outputs.idea_url }}\`"
+            echo "- base: \`${{ inputs.base_repo }}@${{ inputs.base_ref }}\` (\`${{ needs.resolve.outputs.base_sha }}\`)"
+            echo "- candidate: \`${{ inputs.candidate_repo }}@${{ inputs.candidate_ref }}\` (\`${{ needs.resolve.outputs.candidate_sha }}\`)"
+            echo "- Gradle distribution (fixed): \`${{ inputs.gradle_distribution_url }}\`"
             echo "- Daemon heap: \`${{ inputs.daemon_xmx }}\` (JDK 25, \`-XX:+UseCompactObjectHeaders\`)"
             echo "- Build-ops trace: \`${{ inputs.build_ops_trace }}\`"
-            echo "- Android Studio: \`${{ inputs.studio_url }}\`"
-            echo "- gradle-profiler: \`${{ inputs.gradle_profiler_url }}\`"
-            echo "- exit codes: cold=\`${{ steps.bench.outputs.rc_cold }}\` warm=\`${{ steps.bench.outputs.rc_warm }}\` (124/137 = timeout kill, likely daemon OOM)"
+            echo "- Both legs ran sequentially on the SAME runner (machine speed cancels out)"
+            echo "- exit codes: base cold/warm=\`${{ steps.bench.outputs.rc_base_cold }}\`/\`${{ steps.bench.outputs.rc_base_warm }}\`, candidate cold/warm=\`${{ steps.bench.outputs.rc_candidate_cold }}\`/\`${{ steps.bench.outputs.rc_candidate_warm }}\` (124/137 = timeout kill, likely daemon OOM)"
             echo "- workflow run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
             echo
           } > summary.md
-          for mode in cold warm; do
-            [ -f "cpu-logs/$mode/system.csv" ] || continue
-            echo "### $mode sync" >> summary.md
-            python3 tools/cpu-summary.py "cpu-logs/$mode" >> summary.md
-          done
           if [ -f calib.json ]; then
-            {
-              echo "### Runner calibration"
-              echo
-              echo '```json'
-              cat calib.json
-              echo '```'
-              echo
-            } >> summary.md
+            { echo "### Runner calibration"; echo; echo '```json'; cat calib.json; echo '```'; echo; } >> summary.md
           fi
-          if [ -f perf-metrics.json ]; then
-            {
-              echo "### Sync times (ms)"
-              echo
-              echo '```json'
-              jq '{cold: .cold.sync, warm: .warm.sync}' perf-metrics.json
-              echo '```'
-            } >> summary.md
+          if [ -f perf-metrics-base.json ] && [ -f perf-metrics-candidate.json ]; then
+            python3 tools/compare-metrics.py perf-metrics-base.json perf-metrics-candidate.json \
+              --base-label '${{ inputs.base_repo }}@${{ inputs.base_ref }}' \
+              --candidate-label '${{ inputs.candidate_repo }}@${{ inputs.candidate_ref }}' \
+              > compare.md
+            cat compare.md >> summary.md
           fi
-          ls -la results-cold results-warm cpu-logs/* 2>/dev/null || true
+          for leg in base candidate; do
+            for mode in cold warm; do
+              [ -f "cpu-logs/$leg-$mode/system.csv" ] || continue
+              echo "### $leg $mode sync" >> summary.md
+              python3 tools/cpu-summary.py "cpu-logs/$leg-$mode" >> summary.md
+            done
+          done
+          ls -la results-* cpu-logs/* 2>/dev/null || true
           df -h /; free -h
 
       - name: Upload artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: idea-sync-perf-${{ github.run_number }}-${{ matrix.name }}
+          name: idea-measure-perf-${{ github.run_number }}
           if-no-files-found: warn
           retention-days: 7
           path: |
             cpu-logs/
-            perf-metrics.json
+            perf-metrics-base.json
+            perf-metrics-candidate.json
+            compare.md
             summary.md
-            profiler-cold.log
-            profiler-warm.log
+            profiler-*.log
             gradle.properties
             gradle/wrapper/gradle-wrapper.properties
-            results-cold/
-            results-warm/
+            results-base-cold/
+            results-base-warm/
+            results-candidate-cold/
+            results-candidate-warm/
 
       - name: Job summary
         if: always()
         run: cat summary.md >> "$GITHUB_STEP_SUMMARY"
 
-      # Results go to a release (not just artifacts): release assets have fast,
+      # Results go to releases (not just artifacts): release assets have fast,
       # stable, publicly accessible download URLs — Actions artifact downloads are slow.
-      - name: Publish results as a release
+      - name: Publish results as releases
         if: always()
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           [ -f summary.md ] || echo "# benchmark failed before the report step" > summary.md
-          tag="run-idea-${{ github.run_number }}-${{ matrix.name }}"
-          gver=$(basename '${{ steps.urls.outputs.gradle_url }}' | sed -E 's/^gradle-//; s/-(bin|all)\.zip$//')
-          assets=()
-          for f in perf-metrics.json summary.md profiler-cold.log profiler-warm.log \
-                    sync.scenarios gradle.properties gradle/wrapper/gradle-wrapper.properties; do
-            [ -f "$f" ] && assets+=("$f")
-          done
-          # Per-mode assets need unique names (both modes produce benchmark.csv etc.).
-          for mode in cold warm; do
-            for name in benchmark.csv benchmark.html; do
-              src="results-$mode/$name"
-              [ -f "$src" ] && cp "$src" "$mode-$name" && assets+=("$mode-$name")
-            done
-            ide="results-$mode/studio-sandbox/logs/idea.log"
-            [ -f "$ide" ] && cp "$ide" "$mode-idea.log" && assets+=("$mode-idea.log")
-          done
+
           # Perfetto traces + raw build-ops logs; gzip both (traces are ~800 MB, raw
           # logs several GB — ui.perfetto.dev opens gzipped traces directly).
-          find results-cold results-warm -name '*-log.txt' -exec gzip -1 {} + 2>/dev/null || true
-          find results-cold results-warm -name '*.perfetto.proto' -exec gzip -1 {} + 2>/dev/null || true
-          # Process substitution, not a pipe: a piped while-loop runs in a subshell
-          # and the assets array additions would be lost.
-          while read -r f; do
-            base=$(basename "$f")
-            cp "$f" "$base" && assets+=("$base")
-          done < <(find results-cold results-warm \( -name '*.perfetto.proto.gz' -o -name '*-log.txt.gz' \) 2>/dev/null)
-          tar -czf cpu-logs.tar.gz -C cpu-logs . 2>/dev/null && assets+=(cpu-logs.tar.gz)
-          if [ "${{ steps.bench.outputs.rc_cold }}" = "0" ] && [ "${{ steps.bench.outputs.rc_warm }}" = "0" ]; then
-            outcome="cold + warm sync measured"
-          else
-            outcome="FAILED (cold rc=${{ steps.bench.outputs.rc_cold }}, warm rc=${{ steps.bench.outputs.rc_warm }})"
-          fi
-          gh release delete "$tag" --yes -R '${{ github.repository }}' 2>/dev/null || true
-          gh release create "$tag" -R '${{ github.repository }}' \
-            --title "IDEA sync perf run #${{ github.run_number }} (${{ matrix.name }}: ${{ matrix.repo }}@$(echo '${{ matrix.sha }}' | cut -c1-12)) — Gradle $gver, daemon ${{ inputs.daemon_xmx }} — $outcome" \
+          find results-base-cold results-base-warm results-candidate-cold results-candidate-warm \
+            -name '*-log.txt' -exec gzip -1 {} + 2>/dev/null || true
+          find results-base-cold results-base-warm results-candidate-cold results-candidate-warm \
+            -name '*.perfetto.proto' -exec gzip -1 {} + 2>/dev/null || true
+
+          publish_leg() {
+            local leg="$1" title_leg="$2" rc_c="$3" rc_w="$4"
+            local tag="run-idea-${{ github.run_number }}-$leg"
+            local assets=()
+            for f in perf-metrics-$leg.json profiler-$leg-cold.log profiler-$leg-warm.log; do
+              [ -f "$f" ] && assets+=("$f")
+            done
+            for mode in cold warm; do
+              for name in benchmark.csv benchmark.html; do
+                local src="results-$leg-$mode/$name"
+                [ -f "$src" ] && cp "$src" "$leg-$mode-$name" && assets+=("$leg-$mode-$name")
+              done
+              local ide="results-$leg-$mode/studio-sandbox/logs/idea.log"
+              [ -f "$ide" ] && cp "$ide" "$leg-$mode-idea.log" && assets+=("$leg-$mode-idea.log")
+              # Process substitution, not a pipe: a piped while-loop runs in a
+              # subshell and the assets array additions would be lost.
+              while read -r f; do
+                local base=$(basename "$f")
+                cp "$f" "$leg-$mode-$base" && assets+=("$leg-$mode-$base")
+              done < <(find "results-$leg-$mode" \( -name '*.perfetto.proto.gz' -o -name '*-log.txt.gz' \) 2>/dev/null)
+            done
+            local outcome="cold + warm sync measured"
+            [ "$rc_c" = "0" ] && [ "$rc_w" = "0" ] || outcome="FAILED (cold rc=$rc_c, warm rc=$rc_w)"
+            gh release delete "$tag" --yes -R '${{ github.repository }}' 2>/dev/null || true
+            gh release create "$tag" -R '${{ github.repository }}' \
+              --title "IDEA sync perf run #${{ github.run_number }} ($title_leg) — daemon ${{ inputs.daemon_xmx }} — $outcome" \
+              --notes-file summary.md \
+              "${assets[@]}"
+          }
+
+          publish_leg base '${{ inputs.base_repo }}@${{ inputs.base_ref }}' \
+            '${{ steps.bench.outputs.rc_base_cold }}' '${{ steps.bench.outputs.rc_base_warm }}'
+          publish_leg candidate '${{ inputs.candidate_repo }}@${{ inputs.candidate_ref }}' \
+            '${{ steps.bench.outputs.rc_candidate_cold }}' '${{ steps.bench.outputs.rc_candidate_warm }}'
+
+          tar -czf cpu-logs.tar.gz -C cpu-logs . 2>/dev/null || true
+          diff_tag="run-idea-${{ github.run_number }}-perf-diff"
+          diff_assets=(summary.md)
+          [ -f compare.md ] && diff_assets+=(compare.md)
+          [ -f perf-metrics-base.json ] && diff_assets+=(perf-metrics-base.json)
+          [ -f perf-metrics-candidate.json ] && diff_assets+=(perf-metrics-candidate.json)
+          [ -f cpu-logs.tar.gz ] && diff_assets+=(cpu-logs.tar.gz)
+          gh release delete "$diff_tag" --yes -R '${{ github.repository }}' 2>/dev/null || true
+          gh release create "$diff_tag" -R '${{ github.repository }}' \
+            --title "IDEA sync perf run #${{ github.run_number }} — base vs candidate" \
             --notes-file summary.md \
-            "${assets[@]}"
-          echo "**Results published: ${{ github.server_url }}/${{ github.repository }}/releases/tag/$tag**" >> "$GITHUB_STEP_SUMMARY"
+            "${diff_assets[@]}"
+          echo "**Results published: run-idea-${{ github.run_number }}-{base,candidate,perf-diff}**" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Verdict
         if: always()
         run: |
-          if [ "${{ steps.bench.outputs.rc_cold }}" != "0" ]; then
-            echo "FAIL: cold sync did not complete (rc=${{ steps.bench.outputs.rc_cold }}; 124/137 = timeout, likely daemon OOM at ${{ inputs.daemon_xmx }})."
-            exit 1
-          fi
-          if [ ! -f results-cold/benchmark.csv ]; then
-            echo "FAIL: cold sync finished but results-cold/benchmark.csv is missing."
-            exit 1
-          fi
-          if [ "${{ steps.bench.outputs.rc_warm }}" != "0" ]; then
-            echo "FAIL: warm sync did not complete (rc=${{ steps.bench.outputs.rc_warm }})."
-            exit 1
-          fi
-          echo "OK: cold and warm sync measured."
-          exit 0
-
-  # Downloads both legs' perf-metrics.json and diffs the headline numbers.
-  compare:
-    needs: [resolve, sync]
-    runs-on: ubuntu-latest
-    if: always()
-    env:
-      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Download leg metrics
-        run: |
-          set -euo pipefail
-          gh release download "run-idea-${{ github.run_number }}-base" -R '${{ github.repository }}' \
-            -p perf-metrics.json -O base.json --clobber
-          gh release download "run-idea-${{ github.run_number }}-candidate" -R '${{ github.repository }}' \
-            -p perf-metrics.json -O candidate.json --clobber
-
-      - name: Diff metrics
-        run: |
-          set -euo pipefail
-          python3 tools/compare-metrics.py base.json candidate.json \
-            --base-label '${{ inputs.base_repo }}@${{ inputs.base_ref }}' \
-            --candidate-label '${{ inputs.candidate_repo }}@${{ inputs.candidate_ref }}' \
-            > compare.md
-          cat compare.md >> "$GITHUB_STEP_SUMMARY"
-
-      - name: Publish comparison as a release
-        if: always()
-        run: |
-          tag="run-idea-${{ github.run_number }}-perf-diff"
-          gh release delete "$tag" --yes -R '${{ github.repository }}' 2>/dev/null || true
-          gh release create "$tag" -R '${{ github.repository }}' \
-            --title "IDEA sync perf run #${{ github.run_number }} — base vs candidate" \
-            --notes-file compare.md \
-            compare.md base.json candidate.json
+          failed=0
+          rc_bc='${{ steps.bench.outputs.rc_base_cold }}'
+          rc_bw='${{ steps.bench.outputs.rc_base_warm }}'
+          rc_cc='${{ steps.bench.outputs.rc_candidate_cold }}'
+          rc_cw='${{ steps.bench.outputs.rc_candidate_warm }}'
+          for pair in "base cold $rc_bc" "base warm $rc_bw" "candidate cold $rc_cc" "candidate warm $rc_cw"; do
+            set -- $pair
+            if [ "$3" != "0" ]; then echo "FAIL: $1 $2 sync did not complete (rc=$3; 124/137 = timeout, likely daemon OOM at ${{ inputs.daemon_xmx }})"; failed=1; fi
+            if [ "$3" = "0" ] && [ ! -f "results-$1-$2/benchmark.csv" ]; then echo "FAIL: $1 $2 finished but benchmark.csv is missing"; failed=1; fi
+          done
+          [ "$failed" = 0 ] && echo "OK: both legs measured (cold + warm) on one runner."
+          exit $failed

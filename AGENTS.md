@@ -36,11 +36,12 @@ modules themselves.
   run-down). `.github/workflows/build-profiler.yml` — builds the patched gradle-profiler
   and publishes it under the `patched-profiler` release tag.
 - `.github/workflows/measure-commits.yml` — end-to-end performance comparison of two
-  Gradle refs in a single run (resolve → build both in parallel → sync both in parallel
-  → compare). Built dists are cached as `gradle-build-<sha12>` release assets, so
-  re-measuring a commit skips its ~35 min build. `measure-idea-commits.yml` does the
-  same for two IntelliJ refs, overlaying freshly built tooling-extension jars into
-  Studio (Gradle distribution fixed for both legs).
+  Gradle refs in a single run (resolve → build both in parallel → sync **both legs
+  sequentially on ONE runner** so machine-speed variance cancels → in-job compare).
+  Built dists are cached as `gradle-build-<sha12>` release assets, so re-measuring a
+  commit skips its ~35 min build. `measure-idea-commits.yml` does the same for two
+  IntelliJ refs, overlaying freshly built tooling-extension jars into Studio per leg
+  (Gradle distribution fixed for both legs).
 
 ## Commands
 
@@ -71,6 +72,14 @@ modules themselves.
   (default input); rebuild via `build-profiler.yml` when bumping the profiler version.
 - On CI the IDE must run headless: `GRADLE_PROFILER_OPTS=-Dide.tests.headless=true`.
   Full-GUI Studio under xvfb hangs in project frame creation and the sync never starts.
+- Comparisons (`measure-commits`, `measure-idea-commits`) run both legs **sequentially
+  on one runner** on purpose: GitHub-hosted runners vary ~20% in speed (observed: one
+  leg of a parallel matrix on a slow runner fakes a ~20% regression). Each leg kills
+  leftover daemons/IDE and uses a fresh `GRADLE_USER_HOME`, so both cold syncs are
+  truly cold. Job timeout is 360 min; per-mode `timeout` is 75/60 min so a hung
+  (OOM'd) leg fails fast without eating the other leg's budget. `tools/runner-calib.py`
+  records the machine's speed in every `perf-metrics.json` (`calibration` key) — check
+  it when a single `sync-benchmark` run looks off.
 - `--build-ops-trace` works for studio-sync scenarios: the trace flags
   (`-Dorg.gradle.internal.operations.trace=...`) ride on the jvm args the profiler
   forwards to the IDE-driven Gradle invocations via its agent protocol, so the sync

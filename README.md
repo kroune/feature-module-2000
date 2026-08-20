@@ -73,7 +73,8 @@ red otherwise (timeout kill = likely daemon OOM at the given `daemon_xmx`).
 
 Actions → **measure-commits** → *Run workflow* — end-to-end performance comparison of
 two Gradle refs (typically an upstream commit vs a fork branch with an optimization) in
-a single run: `resolve → build (both in parallel) → sync (both in parallel) → compare`.
+a single run: `resolve → build (both in parallel) → sync (both legs on one runner) →
+compare`.
 
 ```bash
 gh workflow run measure-commits.yml \
@@ -97,11 +98,12 @@ What a run does:
    repo. The build is **skipped entirely when that release already exists**, so
    re-measuring a commit costs no rebuild. Build time ranges from minutes (remote
    build-cache hits) to ~1–2 h cold.
-3. `sync` (one job per ref, parallel) runs the exact same cold+warm sync benchmark as
-   sync-benchmark against the freshly built distribution and publishes
-   **`run-<N>-base` / `run-<N>-candidate`** releases.
-4. `compare` downloads both legs' `perf-metrics.json` and publishes a side-by-side diff
-   (sync times, CPU means, deltas in %) as **`run-<N>-perf-diff`**.
+3. `sync` (**one** job) runs both legs **sequentially on the same runner** — GitHub-hosted
+   runners vary ~20% in machine speed, so a parallel matrix leg on a slow runner would
+   fake a regression. Each leg gets a fresh Gradle user home and no leftover daemons, so
+   both cold syncs are truly cold; each leg measures cold + warm sync with CPU sampling
+   and a build-ops trace. Publishes **`run-<N>-base` / `run-<N>-candidate`** releases
+   plus the side-by-side diff **`run-<N>-perf-diff`** (computed in-job).
 
 ## The `measure-idea-commits` workflow
 
