@@ -47,8 +47,8 @@ on:
         default: "sync-modern-dep-resolver"
         type: string
       gradle_distribution_url:
-        description: "Fixed Gradle bin zip URL used for BOTH legs"
-        default: "https://services.gradle.org/distributions/gradle-9.7.0-rc-1-bin.zip"
+        description: "Fixed Gradle bin zip URL used for BOTH legs (default: transformed-artifact-files-only build — the sync-* tooling-extension branches are ABI-paired with it; official 9.7.0-rc-1 fails with NoSuchMethodError)"
+        default: "https://github.com/kroune/feature-module-2000/releases/download/gradle-build-0fde246a8947/gradle-0fde246a8947-bin.zip"
         type: string
       daemon_xmx:
         description: "Gradle daemon heap, -Xmx = -Xms (project must sync within it; 9g default)"
@@ -422,7 +422,7 @@ jobs:
       # Results go to releases (not just artifacts): release assets have fast,
       # stable, publicly accessible download URLs — Actions artifact downloads are slow.
       - name: Publish results as releases
-        if: always()
+        if: ${{ always() && !cancelled() }}
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |

@@ -382,7 +382,7 @@ jobs:
       # Results go to releases (not just artifacts): release assets have fast,
       # stable, publicly accessible download URLs — Actions artifact downloads are slow.
       - name: Publish results as releases
-        if: always()
+        if: ${{ always() && !cancelled() }}
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
