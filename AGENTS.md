@@ -90,8 +90,11 @@ modules themselves.
   all runs of a job), so a throwaway **primer sync** runs first to absorb one-time
   costs (dist + dependency downloads, artifact instrumentation — ~116 s at 100
   modules, confirmed in build-ops traces) that would otherwise land on the first
-  measured leg. Job timeout is 360 min; per-run `timeout` is 45 min so a hung
-  (OOM'd) run fails fast without eating the other legs' budget. `tools/runner-calib.py`
+  measured leg. Job timeout is 360 min (the hosted-runner hard cap); per-run `timeout`
+  is 75 min cold / 115 min warm (a 2000-module cold sync on Rabbit 1 is ~35-45 min)
+  so a hung (OOM'd) run fails fast without eating the other legs' budget. The
+  `warm_iterations` input (default 3) sets the warm scenario's measured iterations —
+  use 2 at 2000 modules to stay under the job cap. `tools/runner-calib.py`
   records the machine's speed in every `perf-metrics.json` (`calibration` key) — check
   it when a single `sync-benchmark` run looks off.
 - `--build-ops-trace` works for studio-sync scenarios: the trace flags

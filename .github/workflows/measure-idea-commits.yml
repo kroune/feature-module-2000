@@ -19,8 +19,9 @@ name: measure-idea-commits
 #               preceded by a throwaway PRIMER sync that absorbs the one-time first-run
 #               costs (dist + dependency downloads into the profiler-managed shared
 #               Gradle user home — observed ~116 s at 100 modules, landing on whichever
-#               leg runs first), then one warm scenario per leg (1 warm-up + 3 measured
-#               iterations). The Studio-bundled tooling-extension jars are REPLACED
+#               leg runs first), then one warm scenario per leg (1 warm-up + N measured
+#               iterations, N = warm_iterations input — reduce it for big projects).
+#               The Studio-bundled tooling-extension jars are REPLACED
 #               before every run with the leg's freshly built ones (the tooling
 #               extension runs inside the Gradle daemon during sync; the rest of the IDE
 #               is untouched). The Gradle distribution is FIXED for both legs via
@@ -63,6 +64,10 @@ on:
         description: "Record the Gradle build-operation trace and publish a Perfetto trace"
         default: true
         type: boolean
+      warm_iterations:
+        description: "Measured iterations of the warm-sync scenario (1 warm-up + N measured). Reduce for big projects: at 2000 modules one Rabbit warm scenario sync is tens of minutes, so 2 keeps the job under the 6 h cap"
+        default: "3"
+        type: string
       studio_url:
         description: "Android Studio linux.tar.gz URL (from jb.gg/android-studio-releases-list.json). Default is Rabbit 1 (platform 262): the sync-* tooling branches need the post-IDEA-385795 API (getClasspath: List, not DomainObjectSet) — Quail 2 predates it and sync fails with NoSuchMethodError"
         default: "https://edgedl.me.gvt1.com/android/studio/ide-zips/2026.2.1.1/android-studio-rabbit1-canary1-linux.tar.gz"
@@ -305,6 +310,11 @@ jobs:
           TRACE_FLAG=()
           [ '${{ inputs.build_ops_trace }}' = 'true' ] && TRACE_FLAG=(--build-ops-trace)
 
+          # Warm-sync measured iteration count is a workflow input (default 3); big
+          # projects need fewer iterations to fit the 6 h job cap.
+          sed -i '/^warm-sync {/,/^}/ s/iterations = [0-9]*/iterations = ${{ inputs.warm_iterations }}/' sync.scenarios
+          grep -A3 'warm-sync' sync.scenarios | head -5
+
           # The tooling extension runs inside the Gradle daemon during sync; replacing
           # these two jars swaps the IDE-side implementation. Re-overlaid before every
           # run because the legs interleave.
@@ -356,26 +366,29 @@ jobs:
           # observed in build-ops traces). The throwaway primer run below absorbs that
           # penalty so no MEASURED leg is polluted by it; afterwards every cold leg
           # sees the same warm dependency cache and they stay comparable.
+          # Timeout 75 min: a 2000-module cold sync on Rabbit 1 takes ~35-45 min.
           run_cold() {
             local leg="$1" idx="$2"
             overlay_jars "$leg" || return 1
             reset_to_cold
-            run_profiler "$leg" "cold$idx" 45 --single-shot cold-sync
+            run_profiler "$leg" "cold$idx" 75 --single-shot cold-sync
           }
 
           # Warm sync: the scenario's own warm-up iteration handles daemon/IDE warmup.
+          # Timeout 115 min: warm-up sync is cold-ish (~40 min at 2000 modules) plus
+          # the measured iterations (~10-15 min each on Rabbit 1).
           run_warm() {
             local leg="$1"
             overlay_jars "$leg" || return 1
             reset_to_cold
-            run_profiler "$leg" warm 45 warm-sync
+            run_profiler "$leg" warm 115 warm-sync
           }
 
           # Throwaway primer (base config, results discarded): absorbs the one-time
           # first-run costs described above. Not published, not part of the metrics.
           overlay_jars base || exit 1
           reset_to_cold
-          run_profiler primer primer 45 --single-shot cold-sync || echo "primer sync failed (rc=$?) — continuing, first measured leg will absorb the warmup"
+          run_profiler primer primer 75 --single-shot cold-sync || echo "primer sync failed (rc=$?) — continuing, first measured leg will absorb the warmup"
 
           run_cold base 1
           run_cold candidate 1
