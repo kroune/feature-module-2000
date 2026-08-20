@@ -106,6 +106,12 @@ jobs:
           mkdir -p "$RUNNER_TEMP/studio"
           tar -xzf studio.tar.gz -C "$RUNNER_TEMP/studio" --strip-components=1
           rm studio.tar.gz
+          # Canary/preview builds dynamically attach Studio's ThreadingChecker agent
+          # (DebugFlag studio.diagnostic.threading.agent.enable defaults on there) —
+          # bytecode instrumentation that made the IDE side ~6x slower on this project.
+          # Release builds never attach it. Deleting the jar disables the dynamic attach
+          # (the loader warns and continues), keeping canary behavior close to release.
+          rm -f "$RUNNER_TEMP/studio/plugins/android/resources/threading_agent.jar"
           ls "$RUNNER_TEMP/studio/bin"
           df -h /
 
