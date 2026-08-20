@@ -15,8 +15,11 @@ name: measure-idea-commits
 #               between hosted runners (observed ~20%) cancels out. Accuracy design
 #               (measured in a same-ref self-test on this repo): a single cold sync per
 #               leg still carries ~25% leg-order/session noise, so each leg gets TWO
-#               cold syncs with fresh Gradle user homes, INTERLEAVED (base1, cand1,
-#               base2, cand2), then one warm scenario per leg (1 warm-up + 3 measured
+#               cold syncs with fresh daemons, INTERLEAVED (base1, cand1, base2, cand2),
+#               preceded by a throwaway PRIMER sync that absorbs the one-time first-run
+#               costs (dist + dependency downloads into the profiler-managed shared
+#               Gradle user home — observed ~116 s at 100 modules, landing on whichever
+#               leg runs first), then one warm scenario per leg (1 warm-up + 3 measured
 #               iterations). The Studio-bundled tooling-extension jars are REPLACED
 #               before every run with the leg's freshly built ones (the tooling
 #               extension runs inside the Gradle daemon during sync; the rest of the IDE
@@ -193,10 +196,12 @@ jobs:
             '${{ steps.cached.outputs.asset }}'
 
   # Both legs run on THIS runner: identical machine speed, so the comparison isolates
-  # the IDE-side change. Every cold sync gets its own fresh GRADLE_USER_HOME (and no
-  # leftover daemons), and the legs interleave (base1, cand1, base2, cand2) so any
-  # within-job machine-speed drift hits both legs equally. The perf diff is computed
-  # in-job — both legs' metrics are local files here.
+  # the IDE-side change. A throwaway primer sync absorbs the one-time first-run costs
+  # (dist + dependency downloads into the profiler-managed shared Gradle user home),
+  # then every cold sync starts with a fresh daemon and no leftover processes, and the
+  # legs interleave (base1, cand1, base2, cand2) so any within-job machine-speed drift
+  # hits both legs equally. The perf diff is computed in-job — both legs' metrics are
+  # local files here.
   sync:
     needs: [resolve, build-idea]
     runs-on: ubuntu-latest
@@ -343,26 +348,34 @@ jobs:
             return $rc
           }
 
-          # One truly cold sync: fresh Gradle user home (wrapper dist, dependency cache,
-          # configuration cache — all cold), no leftover daemons.
+          # "Cold" = fresh daemon and cold JVMs (--single-shot implies --cold-daemon),
+          # no leftover processes. Note: gradle-profiler manages the Gradle user home
+          # itself (<project>/gradle-user-home, shared by every run of the job), so the
+          # first sync of the job pays ALL one-time costs — wrapper dist download,
+          # dependency downloads, artifact instrumentation (~116s at 100 modules,
+          # observed in build-ops traces). The throwaway primer run below absorbs that
+          # penalty so no MEASURED leg is polluted by it; afterwards every cold leg
+          # sees the same warm dependency cache and they stay comparable.
           run_cold() {
             local leg="$1" idx="$2"
             overlay_jars "$leg" || return 1
             reset_to_cold
-            export GRADLE_USER_HOME="$RUNNER_TEMP/guh-$leg-cold$idx"
-            rm -rf "$GRADLE_USER_HOME"
             run_profiler "$leg" "cold$idx" 45 --single-shot cold-sync
           }
 
-          # Warm sync reuses the leg's second cold-run user home (dependency cache etc.
-          # warm; the scenario's own warm-up iteration handles daemon/IDE warmup).
+          # Warm sync: the scenario's own warm-up iteration handles daemon/IDE warmup.
           run_warm() {
             local leg="$1"
             overlay_jars "$leg" || return 1
             reset_to_cold
-            export GRADLE_USER_HOME="$RUNNER_TEMP/guh-$leg-cold2"
             run_profiler "$leg" warm 45 warm-sync
           }
+
+          # Throwaway primer (base config, results discarded): absorbs the one-time
+          # first-run costs described above. Not published, not part of the metrics.
+          overlay_jars base || exit 1
+          reset_to_cold
+          run_profiler primer primer 45 --single-shot cold-sync || echo "primer sync failed (rc=$?) — continuing, first measured leg will absorb the warmup"
 
           run_cold base 1
           run_cold candidate 1

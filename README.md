@@ -100,8 +100,10 @@ What a run does:
    build-cache hits) to ~1–2 h cold.
 3. `sync` (**one** job) runs both legs **sequentially on the same runner** — GitHub-hosted
    runners vary ~20% in machine speed, so a parallel matrix leg on a slow runner would
-   fake a regression. Each leg gets a fresh Gradle user home and no leftover daemons, so
-   both cold syncs are truly cold; each leg measures cold + warm sync with CPU sampling
+   fake a regression. A throwaway primer sync first absorbs the one-time costs (dist +
+   dependency downloads into the profiler-managed, per-job shared Gradle user home),
+   then each leg starts with a fresh daemon and no leftover processes; each leg measures
+   cold (x2, interleaved) + warm sync with CPU sampling
    and a build-ops trace. Publishes **`run-<N>-base` / `run-<N>-candidate`** releases
    plus the side-by-side diff **`run-<N>-perf-diff`** (computed in-job).
 

@@ -85,8 +85,12 @@ modules themselves.
   still carries ~25% leg-order/session noise even on one machine (measured in a
   same-ref self-test: run-3 cold 533s vs 402s with identical inputs). Warm iterations
   also alternate slow/fast within a session (267s/68s/228s) — compare iteration-wise,
-  not just means. Each cold run kills leftover daemons/IDE and uses a fresh
-  `GRADLE_USER_HOME`. Job timeout is 360 min; per-run `timeout` is 45 min so a hung
+  not just means. Each cold run kills leftover daemons/IDE and starts a fresh daemon.
+  The Gradle user home is profiler-managed (`<project>/gradle-user-home`, shared by
+  all runs of a job), so a throwaway **primer sync** runs first to absorb one-time
+  costs (dist + dependency downloads, artifact instrumentation — ~116 s at 100
+  modules, confirmed in build-ops traces) that would otherwise land on the first
+  measured leg. Job timeout is 360 min; per-run `timeout` is 45 min so a hung
   (OOM'd) run fails fast without eating the other legs' budget. `tools/runner-calib.py`
   records the machine's speed in every `perf-metrics.json` (`calibration` key) — check
   it when a single `sync-benchmark` run looks off.
