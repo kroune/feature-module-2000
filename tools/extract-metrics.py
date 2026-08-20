@@ -72,6 +72,8 @@ def cpu_metrics(dirs):
             with open(process_csv, newline="") as f:
                 proc_rows.extend(csv.DictReader(f))
     out = {}
+    # A sample taken while the sampler was mid-write can have empty fields — skip those.
+    system_rows = [r for r in system_rows if r.get("user_pct") and r.get("system_pct")]
     if system_rows:
         busy = [float(r["user_pct"]) + float(r["system_pct"]) for r in system_rows]
         out["system_busy_pct_mean"] = round(statistics.fmean(busy), 1)
@@ -79,6 +81,9 @@ def cpu_metrics(dirs):
         out["samples"] = len(busy)
     by_role = defaultdict(lambda: {"cpu": [], "rss": []})
     for r in proc_rows:
+        # A process can exit mid-sample, leaving empty fields in the row — skip it.
+        if not r.get("cpu_pct") or not r.get("rss_kb"):
+            continue
         by_role[r["role"]]["cpu"].append(float(r["cpu_pct"]))
         by_role[r["role"]]["rss"].append(int(r["rss_kb"]))
     for role, d in by_role.items():
