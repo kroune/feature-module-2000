@@ -72,6 +72,13 @@ modules themselves.
   (default input); rebuild via `build-profiler.yml` when bumping the profiler version.
 - On CI the IDE must run headless: `GRADLE_PROFILER_OPTS=-Dide.tests.headless=true`.
   Full-GUI Studio under xvfb hangs in project frame creation and the sync never starts.
+- `measure-idea-commits` defaults differ on purpose: `studio_url` is Rabbit 1
+  (platform 262) — the sync-* tooling branches carry the post-IDEA-385795 API
+  (`GradleBuildScriptClasspathModel.getClasspath(): List`); Quail 2 expects
+  `DomainObjectSet` and sync dies with `NoSuchMethodError` when the IDE requests
+  build-script classpath models (the 3000-module repo never sees this: the daemon OOMs
+  first). `gradle_distribution_url` is the `gradle-build-0fde246a8947` custom build
+  (re-hosted in this repo's releases, ABI-paired with those branches).
 - Comparisons (`measure-commits`, `measure-idea-commits`) run both legs **sequentially
   on one runner** on purpose: GitHub-hosted runners vary ~20% in speed (observed: one
   leg of a parallel matrix on a slow runner fakes a ~20% regression). Each leg kills

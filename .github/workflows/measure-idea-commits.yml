@@ -59,8 +59,8 @@ on:
         default: true
         type: boolean
       studio_url:
-        description: "Android Studio linux.tar.gz URL (from jb.gg/android-studio-releases-list.json)"
-        default: "https://edgedl.me.gvt1.com/android/studio/ide-zips/2026.1.2.10/android-studio-quail2-linux.tar.gz"
+        description: "Android Studio linux.tar.gz URL (from jb.gg/android-studio-releases-list.json). Default is Rabbit 1 (platform 262): the sync-* tooling branches need the post-IDEA-385795 API (getClasspath: List, not DomainObjectSet) — Quail 2 predates it and sync fails with NoSuchMethodError"
+        default: "https://edgedl.me.gvt1.com/android/studio/ide-zips/2026.2.1.1/android-studio-rabbit1-canary1-linux.tar.gz"
         type: string
       gradle_profiler_url:
         description: "gradle-profiler dist zip URL (patched build from the build-profiler workflow; upstream 0.25.2 times out waiting for the IDE plugin)"

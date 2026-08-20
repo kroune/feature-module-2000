@@ -115,6 +115,16 @@ the Studio installation (the tooling extension runs inside the Gradle daemon dur
 sync) while the Gradle distribution stays fixed for both legs. `compare` publishes
 **`run-idea-<N>-perf-diff`**.
 
+Two defaults differ from the other workflows, both because the tooling-extension
+branches are ABI-paired with specific counterparts:
+- `studio_url` defaults to **Rabbit 1** (platform 262), not Quail 2: the sync-* branches
+  carry the post-IDEA-385795 tooling API (`GradleBuildScriptClasspathModel.getClasspath():
+  List`); Quail 2 predates it and sync dies with `NoSuchMethodError` once the IDE
+  requests build-script classpath models (in the 3000-module OOM repro this never
+  surfaces — the daemon OOMs before the IDE gets that far).
+- `gradle_distribution_url` defaults to the `gradle-build-0fde246a8947` custom build
+  hosted in this repo's releases (the same pairing the 3000-repo idea measurements used).
+
 ## The `build-profiler` workflow
 
 Actions → **build-profiler** → *Run workflow* clones gradle-profiler (default `v0.25.2`),
