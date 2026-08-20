@@ -205,6 +205,11 @@ jobs:
           docker system prune -af || true
           echo "== after =="; df -h /
 
+      # Fixed busy-loop score: makes slow-runner outliers detectable (GitHub-hosted
+      # runners vary ~10-20% in speed; see tools/runner-calib.py).
+      - name: Runner speed calibration
+        run: python3 tools/runner-calib.py calib.json
+
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
@@ -313,6 +318,9 @@ jobs:
         run: |
           set +e
           python3 tools/extract-metrics.py results-cold results-warm cpu-logs perf-metrics.json
+          if [ -f calib.json ] && [ -f perf-metrics.json ]; then
+            jq --slurpfile c calib.json '.calibration = $c[0]' perf-metrics.json > perf-metrics.tmp && mv perf-metrics.tmp perf-metrics.json
+          fi
           {
             echo "## Android Studio sync performance (${{ matrix.name }}: \`${{ matrix.repo }}@${{ matrix.sha }}\`)"
             echo
@@ -330,6 +338,16 @@ jobs:
             echo "### $mode sync" >> summary.md
             python3 tools/cpu-summary.py "cpu-logs/$mode" >> summary.md
           done
+          if [ -f calib.json ]; then
+            {
+              echo "### Runner calibration"
+              echo
+              echo '```json'
+              cat calib.json
+              echo '```'
+              echo
+            } >> summary.md
+          fi
           if [ -f perf-metrics.json ]; then
             {
               echo "### Sync times (ms)"
