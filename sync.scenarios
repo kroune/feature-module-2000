@@ -9,7 +9,10 @@ cold-sync {
   studio-sync {
     ide-jvm-args = [
       "-Xms256m",
-      "-Xmx4g"
+      "-Xmx4g",
+      // Canary/preview Studio builds run with -ea, which makes the IDE side several
+      // times slower; -da (appended after the bundled options) restores release behavior.
+      "-da"
     ]
   }
 
@@ -23,7 +26,10 @@ warm-sync {
   studio-sync {
     ide-jvm-args = [
       "-Xms256m",
-      "-Xmx4g"
+      "-Xmx4g",
+      // Canary/preview Studio builds run with -ea, which makes the IDE side several
+      // times slower; -da (appended after the bundled options) restores release behavior.
+      "-da"
     ]
   }
 
