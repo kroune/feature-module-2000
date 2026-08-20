@@ -248,7 +248,7 @@ jobs:
 
       - name: Install gradle-profiler
         run: |
-          curl -sL -o gp.zip "${{ inputs.gradle_profiler_url }}"
+          curl -sL --retry 5 --retry-all-errors --retry-delay 10 -o gp.zip "${{ inputs.gradle_profiler_url }}"
           mkdir -p "$RUNNER_TEMP/gp" && unzip -q gp.zip -d "$RUNNER_TEMP/gp" && rm gp.zip
           GP_BIN=$(find "$RUNNER_TEMP/gp" -type f -name gradle-profiler -path "*/bin/*" | head -1)
           echo "Found profiler at $GP_BIN"
@@ -257,7 +257,7 @@ jobs:
 
       - name: Install Android Studio
         run: |
-          curl -sL -o studio.tar.gz "${{ inputs.studio_url }}"
+          curl -sL --retry 5 --retry-all-errors --retry-delay 10 -C - -o studio.tar.gz "${{ inputs.studio_url }}"
           mkdir -p "$RUNNER_TEMP/studio"
           tar -xzf studio.tar.gz -C "$RUNNER_TEMP/studio" --strip-components=1
           rm studio.tar.gz
